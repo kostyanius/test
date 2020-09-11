@@ -1,0 +1,128 @@
+---
+- hosts: all
+  become: true
+  vars_prompt:
+    - name: "ip"
+      prompt: "Please enter server ip"
+
+  environment:
+    GITLAB_HOME: /srv/gitlab
+
+  tasks:
+    - name: Install aptitude using apt
+      apt: name=aptitude state=latest update_cache=yes force_apt_get=yes
+
+    - name: Install required system packages
+      apt: name={{ item }} state=latest update_cache=yes
+      loop: [ 'apt-transport-https', 'ca-certificates', 'curl', 'software-properties-common', 'python3-pip', 'virtualenv', 'python3-setuptools']
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu bionic stable
+        state: present
+
+    - name: Update apt and install docker-ce
+      apt: update_cache=yes name=docker-ce state=latest
+
+    - name: Install Docker Module for Python
+      pip:
+        name: docker
+
+    - name: Pull default Docker image
+      docker_image:
+        name: "gitlab/gitlab-ee:latest"
+        source: pull
+    
+    - name: Log into DockerHub
+      docker_login:
+        username: kostyanius
+        password: Parol`123
+
+    - name: change recursive permission of directory in ansible
+      file:
+        path: /srv/gitlab
+        state: directory
+        mode: 0755 
+  
+#    - name: export gitlab path
+#      command: export GITLAB_HOME=/srv/gitlab
+
+    # Creates the number of containers defined by the variable create_containers, using values from vars file
+    - name: Create gitlab
+      command: docker run --detach  \
+        --hostname  "{{ip}}" \
+        --publish 443:443 --publish 8080:80 --publish 222:22 \
+        --name gitlab \
+        --restart always \
+        --volume $GITLAB_HOME/config:/etc/gitlab \
+        --volume $GITLAB_HOME/logs:/var/log/gitlab \
+        --volume $GITLAB_HOME/data:/var/opt/gitlab \
+        gitlab/gitlab-ee:latest
+
+    # Create gitlab runner config
+    - name: gitlab runner config  
+      command: docker volume create gitlab-runner-config
+
+    # Start gitlab runner with config
+    - name: gitlab runner config run 
+      command: docker run -d --name gitlab-runner --restart always \
+       -v /var/run/docker.sock:/var/run/docker.sock \
+       -v gitlab-runner-config:/etc/gitlab-runner \
+       gitlab/gitlab-runner:latest
+
+    # Get response code
+    - name: Get response code
+      uri:
+        url: "http://{{ip}}:8080/"
+        method: GET
+        status_code: [200,502]
+      register: result
+      until: result.status == 200
+      retries: 20
+      delay: 30
+
+    # Get gitlab runner token
+    - name: Get gitlab runner token      
+      shell: docker exec -t -i gitlab bash -c 'gitlab-rails runner -e production "puts Gitlab::CurrentSettings.current_application_settings.runners_registration_token"'
+      register: token
+ 
+    # Register gitlab runner
+    - name: Register gitlab runner
+      command: docker run --rm -v /srv/gitlab-runner/config:/etc/gitlab-runner gitlab/gitlab-runner register \
+        --non-interactive \
+        --executor "docker" \
+        --docker-image alpine:latest \
+        --url "http://{{ip}}:8080/" \
+        --registration-token {{token.stdout}} \
+        --description "docker runner" \
+        --tag-list "docker" \
+        --run-untagged="true" \
+        --locked="false" \
+        --access-level="not_protected"
+
+    # Install git
+    - name: Install git
+      apt:
+        name: git
+        state: present
+
+    # Add repo
+    - name: Add repo
+      shell: git init test
+
+    # Add files
+    - name: Add files 
+      shell: cp Dockerfile helloworld.js package.json test/
+ 
+    # Docker build
+    - name: Docker build
+      shell: docker build -t helloworld test/
+
+    # Docker run app
+    - name: Docker run app
+      shell: docker run -p 80:3000 -d helloworld
